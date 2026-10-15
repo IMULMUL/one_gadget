@@ -12,7 +12,7 @@ module OneGadget
     # Help message.
     USAGE = 'Usage: one_gadget <FILE|-b BuildID> [options]'
     # Default options.
-    DEFAULT_OPTIONS = { raw: false, force_file: false, level: 0, base: 0 }.freeze
+    DEFAULT_OPTIONS = { format: :pretty, force_file: false, level: 0, base: 0 }.freeze
 
     module_function
 
@@ -49,28 +49,28 @@ module OneGadget
       return show(parser.help) && false unless build_id || libc_file
 
       gadgets = if build_id
-                  OneGadget.gadgets(build_id: build_id, details: true, level: level)
+                  OneGadget.gadgets(build_id:, details: true, level:)
                 else # libc_file
-                  OneGadget.gadgets(file: libc_file, details: true, force_file: @options[:force_file], level: level)
+                  OneGadget.gadgets(file: libc_file, details: true, force_file: @options[:force_file], level:)
                 end
       gadgets.each { |g| g.base = @options[:base] }
       handle_gadgets(gadgets, libc_file)
     end
 
     # Decides how to display fetched gadgets according to options.
-    # @param [Array<OneGadget::Gadget::Gadget>] gadgets
-    # @param [String] libc_file
-    # @return [Boolean]
+    # @param [Array<OneGadget::Gadget::Gadget>] gadgets The gadgets to display.
+    # @param [String] libc_file Path to the libc file the gadgets were fetched from.
+    # @return [Boolean] Whether the gadgets were handled successfully.
     def handle_gadgets(gadgets, libc_file)
       return false if gadgets.empty? # error occurs when fetching gadgets
       return handle_script(gadgets, @options[:script]) if @options[:script]
       return handle_near(libc_file, gadgets, @options[:near]) if @options[:near]
 
-      display_gadgets(gadgets, @options[:raw])
+      display_gadgets(gadgets, @options[:format])
     end
 
     # Displays libc information given BuildID.
-    # @param [String] id
+    # @param [String] id The (possibly abbreviated) BuildID to look up.
     # @return [Boolean]
     #   +false+ is returned if no information found.
     # @example
@@ -119,13 +119,18 @@ module OneGadget
           @options[:level] = l
         end
 
-        opts.on('-n', '--near FUNCTIONS/FILE', 'Order gadgets by their distance to the given functions'\
-                ' or to the GOT functions of the given file.') do |n|
+        opts.on('-n', '--near FUNCTIONS/FILE', 'Order gadgets by their distance to the given functions ' \
+                                               'or to the GOT functions of the given file.') do |n|
           @options[:near] = n
         end
 
-        opts.on('-r', '--[no-]raw', 'Output gadgets offset only, split with one space.') do |v|
-          @options[:raw] = v
+        opts.on('-o FORMAT', '--output-format FORMAT', %i[pretty raw json],
+                'Output format. FORMAT should be one of <pretty|raw|json>.', 'Default: pretty') do |o|
+          @options[:format] = o
+        end
+
+        opts.on('-r', '--raw', 'Alias of -o raw. Output gadgets offset only, split with one space.') do |_|
+          @options[:format] = :raw
         end
 
         opts.on('-s', '--script exploit-script', 'Run exploit script with all possible gadgets.',
@@ -148,7 +153,7 @@ module OneGadget
     end
 
     # Writes +msg+ to stdout and returns +true+.
-    # @param [String] msg
+    # @param [String] msg The message to print.
     # @return [true]
     def show(msg)
       puts msg
@@ -156,15 +161,15 @@ module OneGadget
     end
 
     # Spawns and waits until the process end.
-    # @param [String] cmd
+    # @param [String] cmd The shell command to run.
     # @return [void]
     def execute(cmd)
       Process.wait(spawn(cmd))
     end
 
     # Handles the --script feature.
-    # @param [Array<OneGadget::Gadget::Gadget>] gadgets
-    # @param [String] script
+    # @param [Array<OneGadget::Gadget::Gadget>] gadgets The gadgets whose offsets are passed to the script.
+    # @param [String] script The exploit script to run, invoked as +script $offset+ for each gadget.
     # @return [true]
     def handle_script(gadgets, script)
       gadgets.map(&:offset).each do |offset|
@@ -175,20 +180,25 @@ module OneGadget
     end
 
     # Writes gadgets to stdout.
-    # @param [Array<OneGadget::Gadget::Gadget>] gadgets
-    # @param [Boolean] raw
-    #   In raw mode, only the offset of gadgets are printed.
+    # @param [Array<OneGadget::Gadget::Gadget>] gadgets The gadgets to print.
+    # @param [Symbol] format
+    #   :raw - Only the offset of gadgets are printed.
+    #   :pretty - Colorful and human-readable format.
+    #   :json - In JSON format.
     # @return [true]
-    def display_gadgets(gadgets, raw)
-      if raw
+    def display_gadgets(gadgets, format)
+      case format
+      when :raw
         show(gadgets.map(&:value).join(' '))
-      else
+      when :pretty
         show(gadgets.map(&:inspect).join("\n"))
+      when :json
+        show(gadgets.to_json)
       end
     end
 
     # Logs error.
-    # @param [String] msg
+    # @param [String] msg The error message to log.
     # @return [false]
     def error(msg)
       OneGadget::Logger.error(msg)
@@ -196,12 +206,13 @@ module OneGadget
     end
 
     # Implements the --near feature.
-    # @param [String] libc_file
-    # @param [Array<OneGadget::Gadget::Gadget>] gadgets
+    # @param [String] libc_file Path to the libc file the gadgets belong to.
+    # @param [Array<OneGadget::Gadget::Gadget>] gadgets The gadgets to order by distance.
     # @param [String] near
-    #   This can be name of functions or an ELF file.
+    #   Either name of functions or path to an ELF file.
     #   - Use one comma without spaces to specify a list of functions: +printf,scanf,free+.
     #   - Path to an ELF file and take its GOT functions to process: +/bin/ls+
+    # @return [Boolean] Whether the gadgets were displayed successfully.
     def handle_near(libc_file, gadgets, near)
       return error('Libc file must be given when using --near option') unless libc_file
 
@@ -213,10 +224,19 @@ module OneGadget
       function_offsets = OneGadget::Helper.function_offsets(libc_file, functions)
       return error('No functions for processing') if function_offsets.empty?
 
-      function_offsets.each do |function, offset|
-        colored_offset = OneGadget::Helper.colored_hex(offset)
-        OneGadget::Logger.warn("Gadgets near #{OneGadget::Helper.colorize(function)}(#{colored_offset}):")
-        display_gadgets(gadgets.sort_by { |gadget| (gadget.offset - offset).abs }, @options[:raw])
+      collection = function_offsets.map do |function, offset|
+        {
+          near: function,
+          near_offset: offset,
+          gadgets: gadgets.sort_by { |gadget| (gadget.offset - offset).abs }
+        }
+      end
+      return show(collection.to_json) if @options[:format] == :json
+
+      collection.each do |c|
+        colored_offset = OneGadget::Helper.colored_hex(c[:near_offset])
+        OneGadget::Logger.warn("Gadgets near #{OneGadget::Helper.colorize(c[:near])}(#{colored_offset}):")
+        display_gadgets(c[:gadgets], @options[:format])
         show("\n")
       end
       true

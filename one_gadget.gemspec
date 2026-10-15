@@ -9,8 +9,7 @@ require 'one_gadget/version'
 
 Gem::Specification.new do |s|
   s.name          = 'one_gadget'
-  s.version       = ::OneGadget::VERSION
-  s.date          = Date.today.to_s
+  s.version       = OneGadget::VERSION
   s.summary       = 'one_gadget'
   s.description   = <<-EOS
   When playing ctf pwn challenges we usually needs the one-gadget of execve('/bin/sh', NULL, NULL).
@@ -22,24 +21,32 @@ Gem::Specification.new do |s|
   s.license       = 'MIT'
   s.authors       = ['david942j']
   s.email         = ['david942j@gmail.com']
-  s.files         = Dir['lib/**/*.rb'] + Dir['bin/*'] + %w[README.md]
+  # The gem carries gadgets for a curated set of libcs (see tasks/builds/refresh.rake);
+  # every other build file stays in the repository, where a remote lookup finds it.
+  shipped = File.readlines(File.expand_path('shipped_builds', __dir__), chomp: true)
+  s.files         = Dir['lib/**/*.rb'].grep_v(%r{\Alib/one_gadget/builds/}) +
+                    shipped.map { |name| "lib/one_gadget/builds/#{name}.rb" } +
+                    Dir['bin/*'] + %w[README.md CHANGELOG.md]
   s.homepage      = 'https://github.com/david942j/one_gadget'
   s.executables   = ['one_gadget']
 
   s.metadata = {
     'bug_tracker_uri' => 'https://github.com/david942j/one_gadget/issues',
-    'documentation_uri' => 'https://www.rubydoc.info/github/david942j/one_gadget/master',
+    'changelog_uri' => "https://github.com/david942j/one_gadget/blob/v#{OneGadget::VERSION}/CHANGELOG.md",
+    'documentation_uri' => "https://www.rubydoc.info/gems/one_gadget/#{OneGadget::VERSION}",
     'homepage_uri' => 'https://github.com/david942j/one_gadget',
-    'source_code_uri' => 'https://github.com/david942j/one_gadget'
+    'source_code_uri' => 'https://github.com/david942j/one_gadget',
+    'rubygems_mfa_required' => 'true'
   }
 
-  s.required_ruby_version = '>= 2.4'
+  s.required_ruby_version = '>= 3.3'
 
-  s.add_runtime_dependency 'elftools', '>= 1.0.2', '< 1.2.0'
+  s.add_dependency 'elftools', '>= 2.2.0', '< 3.0.0'
+  s.add_dependency 'logger'
 
   s.add_development_dependency 'rake', '~> 13.0'
   s.add_development_dependency 'rspec', '~> 3.7'
   s.add_development_dependency 'rubocop', '~> 1.0'
-  s.add_development_dependency 'simplecov', '~> 0.17', '< 0.18'
+  s.add_development_dependency 'simplecov', '~> 1.0'
   s.add_development_dependency 'yard', '~> 0.9'
 end

@@ -24,14 +24,15 @@ module OneGadget
       end
 
       # Extract arguments from command.
-      # @param [String] cmd
-      # @return [Array<String>] Arguments.
+      # @param [String] cmd One line of objdump output containing this instruction.
+      # @return [Array<String>] The instruction's operands, with size hints and comments stripped.
       # @raise [OneGadget::Error::InstructionArgumentError]
+      #   Raised when the number of operands does not match {#argc}.
       def fetch_args(cmd)
         idx = cmd.index(inst)
         cmd = cmd[0...cmd.rindex('//')] if cmd.rindex('//')
         cmd = cmd[0...cmd.rindex('#')] if cmd.rindex('#')
-        args = parse_args(cmd[idx + inst.size..-1])
+        args = parse_args(cmd[idx + inst.size..])
         unless argc.include?(args.size)
           raise OneGadget::Error::InstructionArgumentError, "Incorrect argument number in #{cmd}, expect: #{argc}"
         end
@@ -42,14 +43,37 @@ module OneGadget
       end
 
       # If the command contains this instruction.
-      # @param [String] cmd
-      # @return [Boolean]
+      # @param [String] cmd One line of objdump output.
+      # @return [Boolean] +true+ if +cmd+ contains this instruction's mnemonic.
       def match?(cmd)
-        (cmd =~ /#{inst}\s/) != nil
+        cmd.match?(/#{Regexp.escape(inst)}\s/)
+      end
+
+      class << self
+        # The emulator method that runs +mnemonic+. A mnemonic is not always a
+        # method name -- one can carry a suffix spelled with a dot -- so the dots
+        # become underscores. Named here, rather than at each dispatch, so an
+        # emulator defining a family of handlers at once agrees with the dispatcher
+        # about what to call them.
+        # @param [String] mnemonic
+        # @return [Symbol]
+        # @example
+        #   Instruction.handler_name('mov')     #=> :inst_mov
+        #   Instruction.handler_name('sext.w')  #=> :inst_sext_w
+        def handler_name(mnemonic) = :"inst_#{mnemonic.tr('.', '_')}"
+      end
+
+      # The emulator method that runs this instruction.
+      # @return [Symbol]
+      # @see .handler_name
+      def handler
+        @handler ||= self.class.handler_name(inst)
       end
 
       private
 
+      # Split an operand list on the commas that separate operands, which are the
+      # ones outside brackets: a memory operand carries commas of its own.
       def parse_args(str)
         args = []
         cur = +''

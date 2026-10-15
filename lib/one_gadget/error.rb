@@ -30,5 +30,17 @@ module OneGadget
     # Argument error of ruby methods.
     class ArgumentError < Error
     end
+
+    # Raises when the branches taken so far cannot all hold at once, i.e. the
+    # walked path can never execute.
+    class InfeasiblePathError < Error
+    end
+
+    # Raises when a register is read whose value a call left unspecified, so
+    # nothing can be said about it (see
+    # {OneGadget::Emulators::Processor#clobber_caller_saved}). The instruction
+    # itself is understood; its operand simply has no value to reason about.
+    class ClobberedRegisterError < Error
+    end
   end
 end

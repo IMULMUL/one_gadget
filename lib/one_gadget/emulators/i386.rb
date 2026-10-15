@@ -9,6 +9,7 @@ module OneGadget
     class I386 < X86
       class << self
         # Yap, bits.
+        # @return [Integer]
         def bits
           32
         end
@@ -16,20 +17,17 @@ module OneGadget
 
       # Instantiate an {I386} object.
       def initialize
-        super(OneGadget::ABI.i386, 'esp', 'eip')
+        super(OneGadget::ABI.i386, 'esp', 'ebp', 'eip')
       end
 
-      # Get function call arguments.
-      #
-      # For i386 this is a little bit tricky.
-      # We need to fetch the stack slots reference to current 'esp'
-      # but not original 'esp'.
-      # So we need to evaluate the offset of current esp first.
-      # @param [Integer] idx
-      # @return [Lambda, Integer]
+      # The value on the stack slot holding the +idx+-th argument. The slots are
+      # relative to the +esp+ the line sees, not the one the candidate was entered
+      # with, so its offset is evaluated first.
+      # @param [Integer] idx The 0-based index of the argument.
+      # @return [Lambda, Integer] The value on the stack slot holding the +idx+-th argument.
       def argument(idx)
         cur_top = registers['esp'].evaluate('esp' => 0)
-        stack[cur_top + idx * 4]
+        sp_based_stack[cur_top + idx * 4]
       end
     end
   end

@@ -1,21 +1,22 @@
+[![Downloads](https://img.shields.io/gem/dt/one_gadget)](https://rubygems.org/gems/one_gadget)
+
+
 [![Gem Version](https://badge.fury.io/rb/one_gadget.svg)](https://badge.fury.io/rb/one_gadget)
 [![Build Status](https://github.com/david942j/one_gadget/workflows/build/badge.svg)](https://github.com/david942j/one_gadget/actions)
-[![Downloads](http://ruby-gem-downloads-badge.herokuapp.com/one_gadget?type=total&color=orange)](https://rubygems.org/gems/one_gadget)
-[![Code Climate](https://codeclimate.com/github/david942j/one_gadget/badges/gpa.svg)](https://codeclimate.com/github/david942j/one_gadget)
-[![Issue Count](https://codeclimate.com/github/david942j/one_gadget/badges/issue_count.svg)](https://codeclimate.com/github/david942j/one_gadget)
-[![Test Coverage](https://codeclimate.com/github/david942j/one_gadget/badges/coverage.svg)](https://codeclimate.com/github/david942j/one_gadget/coverage)
-[![Inline docs](https://inch-ci.org/github/david942j/one_gadget.svg?branch=master)](https://inch-ci.org/github/david942j/one_gadget)
-[![Yard Docs](http://img.shields.io/badge/yard-docs-blue.svg)](https://www.rubydoc.info/github/david942j/one_gadget/)
+[![Maintainability](https://qlty.sh/gh/david942j/projects/one_gadget/maintainability.svg)](https://qlty.sh/gh/david942j/projects/one_gadget)
+[![Code Coverage](https://qlty.sh/gh/david942j/projects/one_gadget/coverage.svg)](https://qlty.sh/gh/david942j/projects/one_gadget)
+[![API Docs](https://img.shields.io/badge/API-RubyDoc-blue.svg)](https://www.rubydoc.info/gems/one_gadget/)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](http://choosealicense.com/licenses/mit/)
 
 ## OneGadget
 
-When playing ctf pwn challenges we usually need the one-gadget RCE (remote code execution),
-which leads to call `execve('/bin/sh', NULL, NULL)`.
+When solving CTF pwn challenges we usually want a one-gadget RCE: a single address in
+libc that, jumped to, calls `execve("/bin/sh", NULL, NULL)`.
 
-This gem provides such gadgets finder, no need to use objdump or IDA-pro every time like a fool :wink:
+This gem finds them for you, so you don't have to dig through objdump or IDA Pro every
+time :wink:
 
-To use this tool, type `one_gadget /path/to/libc` in command line and enjoy the magic :laughing:
+Point it at a libc -- `one_gadget /path/to/libc` -- and enjoy the magic :laughing:
 
 ## Installation
 
@@ -24,19 +25,42 @@ Available on RubyGems.org!
 $ gem install one_gadget
 ```
 
-Note: requires ruby version >= 2.1.0, you can use `ruby --version` to check.
-
 ## Supported Architectures
 
 - [x] i386
 - [x] amd64 (x86-64)
 - [x] aarch64 (ARMv8)
+- [x] arm (ARMv7, A32/Thumb-2)
+- [x] riscv64 (RV64GC)
+- [x] mips (MIPS32 o32, big- and little-endian)
 
 ## Implementation
 
-OneGadget uses symbolic execution to find the constraints of gadgets to be successful.
+OneGadget symbolically executes the code around each candidate address to work out what
+has to hold for the gadget to work.
+
+Gadgets are found by walking the control-flow graph backward from each `exec`/`posix_spawn`
+call, following conditional branches both ways. When a gadget is only reachable if a branch is
+(not) taken, that decision shows up as an extra constraint, e.g. `x2 == 0x1`.
 
 The article introducing how I develop this tool can be found [on my blog](https://david942j.blogspot.com/2017/02/project-one-gadget-in-glibc.html).
+
+### Checked by running them
+
+Constraints are only worth as much as they are complete, so the gadgets this repository
+ships are verified by being run. [Aletheia](aletheia/README.md) loads the libc in a live
+process, arranges exactly what a gadget's constraints ask for, poisons every register and
+page they *don't* mention, jumps to the offset, and requires a real `/bin/sh` to come back
+and list the root directory. A gadget whose constraint list is missing something fails
+there instead of passing by luck -- which is how several missing constraints were found.
+
+```bash
+bundle exec rake aletheia:verify                # every libc under spec/data, level 0
+bundle exec rake "aletheia:verify[1, aarch64]"  # one output level, one architecture
+```
+
+Aletheia is development tooling: it lives outside `lib/` and `bin/`, so it is not part of
+the published gem.
 
 ## Usage
 
@@ -47,63 +71,80 @@ SHELL_OUTPUT_OF(one_gadget)
 ```
 
 ```bash
-SHELL_OUTPUT_OF(one_gadget /lib/x86_64-linux-gnu/libc.so.6)
+SHELL_OUTPUT_OF(one_gadget spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so)
 ```
 ![x86_64](https://github.com/david942j/one_gadget/blob/master/examples/x86_64.png?raw=true)
 
 #### Given BuildID
 ```bash
-SHELL_OUTPUT_OF(one_gadget -b aad7dbe330f23ea00ca63daf793b766b51aceb5d)
+SHELL_OUTPUT_OF(one_gadget -b b417c0ba7cc5cf06d1d1bed6652cedb9253c60d0)
 ```
 ![build id](https://github.com/david942j/one_gadget/blob/master/examples/from_build_id.png?raw=true)
+
+The gem carries the gadgets of the libcs most likely to be asked for -- the glibc of
+every Ubuntu LTS still in standard support, and every libc the tests cover. Any other
+BuildID is fetched from this repository, which keeps them all.
 
 #### Gadgets Near Functions
 
 ##### Why
 
-Consider this scenario when exploiting:
-1. Able to write on GOT (Global Offset Table)
-2. Base address of libc is *unknown*
+Consider this situation while exploiting:
+1. You can write to the GOT (Global Offset Table).
+2. The base address of libc is *unknown*.
 
-In this scenario you can choose to write two low-byte on a GOT entry with one-gadget's two low-byte.
-If the function offset on GOT is close enough with the one-gadget,
-you will have at least 1/16 chance of success.
+Here you can overwrite the low two bytes of a GOT entry with the low two bytes of a
+one-gadget. If the function sits close enough to the gadget, only one nibble is left to
+guess -- at least a 1 in 16 chance of success.
 
 ##### Usage
 
-Reorder gadgets according to the distance of given functions.
+Sorts the gadgets by how far they are from the functions you name.
 
 ```bash
-SHELL_OUTPUT_OF(one_gadget /lib/x86_64-linux-gnu/libc.so.6 --near exit,mkdir)
+SHELL_OUTPUT_OF(one_gadget spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so --near exit,mkdir)
 ```
 ![near](https://github.com/david942j/one_gadget/blob/master/examples/near.png?raw=true)
 
-Regular expression is acceptable.
+Regular expressions work too.
 ```bash
-SHELL_OUTPUT_OF(one_gadget /lib/x86_64-linux-gnu/libc.so.6 --near 'write.*' --raw)
+SHELL_OUTPUT_OF(one_gadget spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so --near 'write.*' --raw)
 ```
 
-Pass an ELF file as the argument, OneGadget will take all GOT functions for processing.
+Pass an ELF file instead, and OneGadget uses every function in its GOT.
 ```bash
-SHELL_OUTPUT_OF(one_gadget /lib/x86_64-linux-gnu/libc.so.6 --near spec/data/test_near_file.elf --raw)
+SHELL_OUTPUT_OF(one_gadget spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so --near spec/data/test_near_file.elf --raw)
 ```
 
-#### Show All Gadgets
+#### Show More Gadgets
 
-Sometimes `one_gadget` finds too many gadgets to show them in one screen,
-by default gadgets would be filtered automatically *according to the difficulty of constraints*.
+A libc holds far more gadgets than fit on a screen, and most of them ask more of you
+than a handful of others do. `--level` chooses how much of what was found to show.
 
-Use option `--level 1` to show all gadgets found instead of only those with higher probabilities.
+| Level | Shows | Use it when |
+| --- | --- | --- |
+| `0` (default) | the few gadgets whose constraints are easiest to arrange | always, first |
+| `1` | every gadget, one line per address, minus any that asks for everything an easier one asks for and more | none of the level-0 gadgets fit what you control |
+| `2` | everything found, including an address listed once per set of constraints it can be reached under | you want to see every way in, including the awkward ones |
+
+Level 1 drops a gadget when an easier one already asks for everything it does; level 0
+then scores what is left by how hard its constraints look and keeps only the best few;
+level 2 drops nothing. On the glibc 2.31 below that is 4, 32 and 97 entries -- the last
+over 96 addresses, since one of them is reachable two ways with different requirements.
+
+Level 2 reads the libc you point at directly, where the levels below it answer from the
+pre-built gadget database when it knows the file's BuildID -- the same gadgets either
+way. Pass `-f` to search the file at every level.
 
 ```bash
-SHELL_OUTPUT_OF(one_gadget /lib/x86_64-linux-gnu/libc.so.6 --level 1)
+SHELL_OUTPUT_OF(one_gadget spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so --level 1)
 ```
 
 #### Other Architectures
 
 ##### i386
 ```bash
-SHELL_OUTPUT_OF(one_gadget /lib32/libc.so.6)
+SHELL_OUTPUT_OF(one_gadget spec/data/libc-2.27-63b3d43ad45e1b0f601848c65b067f9e9b40528b.so)
 ```
 ![i386](https://github.com/david942j/one_gadget/blob/master/examples/i386.png?raw=true)
 
@@ -113,12 +154,34 @@ SHELL_OUTPUT_OF(one_gadget spec/data/aarch64-libc-2.27.so)
 ```
 ![aarch64](https://github.com/david942j/one_gadget/blob/master/examples/aarch64.png?raw=true)
 
-#### Combine with Script
-Pass your exploit script as `one_gadget`'s arguments, it can
-try all gadgets one by one, so you don't need to try every possible gadgets manually.
+##### ARM32
 
 ```bash
-$ one_gadget ./spec/data/libc-2.19.so -s 'echo "offset ->"'
+SHELL_OUTPUT_OF(one_gadget spec/data/arm-libc-2.39.so)
+```
+
+##### RISC-V (RV64)
+
+```bash
+SHELL_OUTPUT_OF(one_gadget spec/data/riscv64-libc-2.39.so)
+```
+
+##### MIPS
+
+Big-endian is as common as little-endian here, and both are read. This one is
+OpenWrt's musl for ath79, which ships with no section headers -- the shape a
+router's libc usually arrives in.
+
+```bash
+SHELL_OUTPUT_OF(one_gadget spec/data/mips-musl-1.2.4.so)
+```
+
+#### Combine with Script
+Pass your exploit script to `one_gadget` and it runs the script once per gadget, so you
+don't have to work through them by hand.
+
+```bash
+$ one_gadget spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so -s 'echo "offset ->"'
 ```
 
 ![--script](https://github.com/david942j/one_gadget/blob/master/examples/script.png?raw=true)
@@ -126,9 +189,9 @@ $ one_gadget ./spec/data/libc-2.19.so -s 'echo "offset ->"'
 ### In Ruby Scripts
 ```ruby
 require 'one_gadget'
-RUBY_OUTPUT_OF(OneGadget.gadgets(file: '/lib/x86_64-linux-gnu/libc.so.6'))
-# or in shorter way
-RUBY_OUTPUT_OF(one_gadget('/lib/x86_64-linux-gnu/libc.so.6', level: 1))
+RUBY_OUTPUT_OF(OneGadget.gadgets(file: 'spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so'))
+# or, more briefly
+RUBY_OUTPUT_OF(one_gadget('spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so', level: 1))
 # from build id
 RUBY_OUTPUT_OF(one_gadget('b417c0ba7cc5cf06d1d1bed6652cedb9253c60d0'))
 ```
@@ -139,11 +202,11 @@ import subprocess
 def one_gadget(filename):
   return [int(i) for i in subprocess.check_output(['one_gadget', '--raw', filename]).decode().split(' ')]
 
-RUBY_OUTPUT_OF(one_gadget('/lib/x86_64-linux-gnu/libc.so.6'))
+RUBY_OUTPUT_OF(one_gadget('spec/data/libc-2.31-9fdb74e7b217d06c93172a8243f8547f947ee6d1.so'))
 ```
 
 ## Make OneGadget Better
-Any suggestion or feature request is welcome! Feel free to send a pull request.
+Any suggestion or feature request is welcome, and pull requests even more so!
 
-Please let me know if you find any libc that make OneGadget fail to find gadgets.
-And, if you like this work, I'll be happy to be [starred](https://github.com/david942j/one_gadget/stargazers) :grimacing:
+Please let me know if you come across a libc OneGadget finds nothing in. And if you like
+this work, I'd be happy to be [starred](https://github.com/david942j/one_gadget/stargazers) :grimacing:

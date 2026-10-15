@@ -8,6 +8,144 @@ describe OneGadget::Emulators::AArch64 do
     @processor = described_class.new
   end
 
+  describe 'conditional branches' do
+    # Emit the branch decision by feeding cmp, the branch, then a follow-up line
+    # whose address decides taken (== target) vs not-taken (!= target).
+    def branch_constraint(compare, branch, target, follow_addr)
+      @processor.process("1000: #{compare}") if compare
+      @processor.process("1004: #{branch} #{format('%x', target)} <x>")
+      @processor.process("#{format('%x', follow_addr)}: nop")
+      @processor.constraints
+    end
+
+    it 'renders cmp + b.ne / b.eq' do
+      expect(branch_constraint('cmp x2, #1', 'b.ne', 0x2000, 0x1008)).to eq ['x2 == 0x1'] # not taken
+      @processor = described_class.new
+      expect(branch_constraint('cmp x2, #1', 'b.ne', 0x2000, 0x2000)).to eq ['x2 != 0x1'] # taken
+      @processor = described_class.new
+      expect(branch_constraint('cmp x0, x1', 'b.eq', 0x2000, 0x2000)).to eq ['x0 == x1'] # taken
+    end
+
+    it 'falls back for an unparseable compare operand' do
+      expect(@processor.send(:operand_str, 'somelabel')).to eq 'somelabel'
+    end
+
+    it 'renders signed and unsigned comparisons' do
+      expect(branch_constraint('cmp x0, #0x400', 'b.cs', 0x2000, 0x2000)).to eq ['(u64)x0 >= 0x400'] # taken
+      @processor = described_class.new
+      expect(branch_constraint('cmp x0, #0x400', 'b.lt', 0x2000, 0x1008)).to eq ['(s64)x0 >= 0x400'] # not taken
+    end
+
+    # Feed a compare and a branch whose target is the following line, so it
+    # resolves as taken. Returns whether that resolving line was accepted --
+    # false once the accumulated conditions can no longer all hold.
+    # The resolving line must be an instruction this emulator models, else it
+    # would report false for that reason instead of the branch decision.
+    def taken_branch(addr, compare, branch)
+      @processor.process(format('%x: %s', addr, compare))
+      @processor.process(format('%x: %s %x <x>', addr + 4, branch, addr + 8))
+      @processor.process(format('%x: mov x9, x9', addr + 8))
+    end
+
+    it 'rejects a path whose branches cannot all hold' do
+      # Two branches on one compare, taken then not taken: the same test cannot
+      # give both answers, so the path can never execute.
+      expect(taken_branch(0x1000, 'cmp x2, #0x1', 'b.ne')).to be true # x2 != 0x1
+      @processor.process('2000: b.ne 3000 <x>')                       # same compare, not taken
+      expect(@processor.process('2004: mov x9, x9')).to be false      # so x2 == 0x1 too
+    end
+
+    it 'rejects two equalities that disagree' do
+      expect(taken_branch(0x1000, 'cmp x0, #0x1', 'b.eq')).to be true  # x0 == 0x1
+      expect(taken_branch(0x2000, 'cmp x0, #0x2', 'b.eq')).to be false # and x0 == 0x2
+    end
+
+    it 'rejects bounds that leave no value, and keeps ones that do' do
+      expect(taken_branch(0x1000, 'cmp x0, #0x10', 'b.cs')).to be true  # (u64)x0 >= 0x10
+      expect(taken_branch(0x2000, 'cmp x0, #0x20', 'b.ls')).to be true  # .. <= 0x20, still fine
+      expect(taken_branch(0x3000, 'cmp x0, #0x10', 'b.cc')).to be false # .. < 0x10, nothing left
+    end
+
+    it 'rejects an exclusive bound that meets its own limit' do
+      expect(taken_branch(0x1000, 'cmp x0, #0x20', 'b.hi')).to be true  # (u64)x0 > 0x20
+      expect(taken_branch(0x2000, 'cmp x0, #0x20', 'b.ls')).to be false # and (u64)x0 <= 0x20
+    end
+
+    it 'keeps a path whose comparisons are against something other than a number' do
+      # Nothing is known about how x1 and x2 relate, so neither branch is judged.
+      expect(taken_branch(0x1000, 'cmp x0, x1', 'b.eq')).to be true
+      expect(taken_branch(0x2000, 'cmp x0, x2', 'b.ne')).to be true
+    end
+
+    it 'renders cmn as a bound, folding a shifted immediate' do
+      # glibc's "the syscall didn't return -errno" check. An unsigned condition
+      # after cmn reads the carry, so it bounds x0 rather than forcing x0+0x1000
+      # to be zero -- x0 == 0 satisfies it. Same form amd64 emits for this check.
+      expect(branch_constraint('cmn x0, #0x1, lsl #12', 'b.hi', 0x2000, 0x1008))
+        .to eq ['(u64)x0 <= 0xfffffffffffff000'] # not taken
+      @processor = described_class.new
+      expect(branch_constraint('cmn x0, #0x1, lsl #12', 'b.hi', 0x2000, 0x2000))
+        .to eq ['(u64)x0 > 0xfffffffffffff000'] # taken
+      # An equality condition does read the sum, so it keeps the additive form.
+      @processor = described_class.new
+      expect(branch_constraint('cmn x0, #0x1', 'b.eq', 0x2000, 0x2000)).to eq ['(x0 + 0x1) == 0x0']
+    end
+
+    it 'aborts on a compare modifier it cannot model' do
+      # Silently dropping the modifier would understate the constraint.
+      expect(@processor.process('1000: cmn x0, x1, lsl x2')).to be false
+    end
+
+    it 'renders cbz / cbnz' do
+      expect(branch_constraint(nil, 'cbz x0,', 0x2000, 0x1008)).to eq ['x0 != 0x0'] # not taken
+      @processor = described_class.new
+      expect(branch_constraint(nil, 'cbnz x1,', 0x2000, 0x2000)).to eq ['x1 != 0x0'] # taken
+    end
+
+    it 'renders tbz / tbnz bit tests' do
+      expect(branch_constraint(nil, 'tbz w3, #4,', 0x2000, 0x2000)).to eq ['(w3 & 0x10) == 0x0'] # taken
+      @processor = described_class.new
+      expect(branch_constraint(nil, 'tbnz w3, #0,', 0x2000, 0x1008)).to eq ['(w3 & 0x1) == 0x0'] # not taken
+    end
+
+    it 'aborts a cmp-based branch with no preceding compare' do
+      expect(@processor.process('1004: b.ne 2000 <x>')).to be false
+    end
+
+    it 'uses eq/ne but rejects magnitude conditions after tst' do
+      # tst x0,x0 sets ZF = (x0 == 0); b.eq taken means x0 == 0.
+      expect(branch_constraint('tst x0, x0', 'b.eq', 0x2000, 0x2000)).to eq ['x0 == 0x0'] # taken
+      # tst with distinct operands is a real bitmask test.
+      @processor = described_class.new
+      expect(branch_constraint('tst x0, x1', 'b.ne', 0x2000, 0x2000)).to eq ['(x0 & x1) != 0x0'] # taken
+      @processor = described_class.new
+      expect(@processor.process('1000: tst x0, x0')).to be true
+      expect(@processor.process('1004: b.lt 2000 <x>')).to be false # magnitude after tst: unsound
+    end
+  end
+
+  describe 'sub-register views' do
+    it 'lets a w write through to the x register it names part of' do
+      @processor.process('0: mov w0, #0x1')
+      # the call's first argument is that 1, not the value x0 was entered with.
+      expect(@processor.argument(0)).to eq 1
+      @processor.process('4: mov w19, x22')
+      expect(@processor.registers['x19'].to_s).to eq 'x22'
+    end
+
+    it 'names the low half of an untouched register by its own name' do
+      expect(@processor.registers['w19'].to_s).to eq 'w19'
+      @processor.process('0: mov x19, x22')
+      # once the full register holds something, no expression names half of it.
+      expect(@processor.registers['w19'].to_s).to eq 'x22'
+    end
+
+    it 'reads the zero register under either name' do
+      expect(@processor.registers['wzr']).to be_zero
+      expect(@processor.registers['xzr']).to be_zero
+    end
+  end
+
   describe 'process' do
     it 'libc-2.23 gadget' do
       gadget = <<-EOS
@@ -27,6 +165,19 @@ describe OneGadget::Emulators::AArch64 do
       expect(@processor.registers['pc'].to_s).to eq '9b1b0 <execve@@GLIBC_2.17>'
     end
 
+    it 'constrains posix_spawn setup-call pointers (source readable, attr writable)' do
+      # setsigmask copies *arg1 into the attr: arg1 (x1) readable, attr (x0) written.
+      @processor.process('0: mov x1, x22')
+      @processor.process('4: bl e16e0 <posix_spawnattr_setsigmask@@GLIBC_2.17>')
+      expect(@processor.constraints).to include('readable: x22', 'writable: x0')
+
+      # a pure sp-relative attr is writable for free, so it needs no constraint.
+      other = described_class.new
+      other.process('0: add x0, sp, #0x218')
+      other.process('4: bl e1560 <posix_spawnattr_init@@GLIBC_2.17>')
+      expect(other.constraints).not_to include(a_string_matching(/writable: sp/))
+    end
+
     it 'ldr' do
       @processor.process('ldr x0, [x1, #8]!')
       expect(@processor.registers['x0'].to_s).to eq '[x1+0x8]'
@@ -40,14 +191,14 @@ describe OneGadget::Emulators::AArch64 do
     it 'stp' do
       @processor.process('stp x2, x3, [sp, #16]')
       expect(@processor.registers['sp'].to_s).to eq 'sp'
-      expect(@processor.stack[16].to_s).to eq 'x2'
-      expect(@processor.stack[24].to_s).to eq 'x3'
+      expect(@processor.sp_based_stack[16].to_s).to eq 'x2'
+      expect(@processor.sp_based_stack[24].to_s).to eq 'x3'
 
       # equivalent to 'push x1; push x0'
       @processor.process('stp x0, x1, [sp, #-16]!')
       expect(@processor.registers['sp'].to_s).to eq 'sp-0x10'
-      expect(@processor.stack[-8].to_s).to eq 'x1'
-      expect(@processor.stack[-16].to_s).to eq 'x0'
+      expect(@processor.sp_based_stack[-8].to_s).to eq 'x1'
+      expect(@processor.sp_based_stack[-16].to_s).to eq 'x0'
     end
 
     it 'str' do
@@ -56,13 +207,13 @@ describe OneGadget::Emulators::AArch64 do
       @processor.process('str x0, [x1], #-8')
       expect(@processor.registers['sp'].to_s).to eq 'sp'
       expect(@processor.registers['x1'].to_s).to eq 'sp-0x8'
-      expect(@processor.stack[0].to_s).to eq 'x0'
+      expect(@processor.sp_based_stack[0].to_s).to eq 'x0'
 
       @processor.process('str xzr, [sp, #200]')
-      expect(@processor.stack[200]).to be_zero
+      expect(@processor.sp_based_stack[200]).to be_zero
 
       @processor.process('str x2, [sp, #0x100]!')
-      expect(@processor.stack[0x100].to_s).to eq 'x2'
+      expect(@processor.sp_based_stack[0x100].to_s).to eq 'x2'
       expect(@processor.registers['sp'].to_s).to eq 'sp+0x100'
 
       @processor.process('str x3, [x4]')

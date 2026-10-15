@@ -4,39 +4,47 @@ require 'one_gadget/emulators/aarch64'
 require 'one_gadget/fetchers/base'
 
 module OneGadget
-  module Fetcher
+  module Fetchers
     # Define common methods for gadget fetchers.
     class AArch64 < Base
+      # aarch64 condition codes (used to recognise +b.<cond>+ branches).
+      CONDS = %w[eq ne cs hs cc lo mi pl vs vc hi ls ge lt gt le].freeze
+
       private
+
+      # +BL imm26+ is AArch64's only direct call, one word wide and word-aligned,
+      # so the whole scan is a masked compare per word.
+      def scan_calls(base, data, targets)
+        sites = []
+        data.unpack('V*').each_with_index do |word, i|
+          next unless (word & 0xfc000000) == 0x94000000
+
+          imm = word & 0x03ffffff
+          imm -= 1 << 26 if imm.anybits?(1 << 25)
+          addr = base + (i * 4)
+          sites << addr if targets.key?(addr + (imm * 4))
+        end
+        sites
+      end
 
       def emulator
         OneGadget::Emulators::AArch64.new
       end
 
-      # If str contains a branch instruction.
-      def branch?(str)
-        %w[b b.hi b.gt b.eq b.le b.ls b.lt b.ne b.cs].any? { |f| str.include?(" #{f} ") }
+      def branch_lead_chars
+        'bct'
+      end
+
+      def branch_kind(line)
+        m = mnemonic(line)
+        return :conditional if %w[cbz cbnz tbz tbnz].include?(m) || (m.start_with?('b.') && CONDS.include?(m[2..]))
+        return :unconditional if %w[b b.al].include?(m)
+
+        :terminator if %w[ret br braa brab braaz brabz].include?(m)
       end
 
       def call_str
         'bl'
-      end
-
-      def bin_sh_offset
-        @bin_sh_offset ||= str_offset('/bin/sh')
-      end
-
-      def str_bin_sh?(str)
-        str.include?('$base') && str.include?(bin_sh_offset.to_s(16))
-      end
-
-      def str_sh?(str)
-        # XXX: hardcode -0x10 is bad
-        str.include?('$base') && str.include?((bin_sh_offset - 0x10).to_s(16))
-      end
-
-      def global_var?(str)
-        str.include?('$base')
       end
     end
   end

@@ -5,7 +5,7 @@ AllCops:
   Exclude:
     - lib/one_gadget/builds/*.rb
 
-Gemspec/RequiredRubyVersion:
+Gemspec/DevelopmentDependencies:
   Enabled: false
 
 Layout/EndOfLine:
@@ -17,6 +17,12 @@ Layout/HeredocIndentation:
 Layout/LineLength:
   Enabled: true
   Max: 120
+
+Lint/AmbiguousOperatorPrecedence:
+  Enabled: false
+
+Lint/AmbiguousRange:
+  Enabled: false
 
 Metrics/AbcSize:
   Enabled: false
@@ -45,8 +51,17 @@ Naming/HeredocDelimiterNaming:
 Naming/MethodParameterName:
   Enabled: false
 
+Naming/PredicateMethod:
+  Enabled: false
+
 Style/AccessorGrouping:
   Enabled: false
+
+Style/ArrayIntersect:
+  Enabled: false
+
+Style/AsciiComments:
+  Enabled: true
 
 Style/FormatStringToken:
   Enabled: false

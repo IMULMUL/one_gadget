@@ -2,5 +2,5 @@
 
 module OneGadget
   # Current gem version.
-  VERSION = '1.7.4'
+  VERSION = '2.1.1'
 end
